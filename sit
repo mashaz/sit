@@ -1,0 +1,157 @@
+#!/usr/bin/env python3
+#coding: utf-8
+
+import sys
+import os
+import re
+import time
+import asyncio
+import logging
+from asyncio import Queue
+from datetime import datetime
+from urllib.parse import urlparse, parse_qsl, urlunparse, urlencode
+import argparse
+from collections import Counter
+
+try:
+    import aiohttp
+except ImportError:
+    print('pip install aiohttp')
+    sys.exit(1)
+
+if sys.version_info[0] < 3 or \
+    (sys.version_info[0] >= 3 and sys.version_info[1] < 7):
+    raise Exception("Need python version >= 3.7")
+
+color_grey = "\x1b[38;21m"
+color_yellow = "\x1b[33;21m"
+color_red = "\x1b[31;21m"
+color_bold_red = "\x1b[31;1m"
+color_reset = "\x1b[0m"
+
+FORMAT = '%(asctime)s [%(levelname)s] %(message)s'
+logging.basicConfig(format=FORMAT, level='INFO')
+logger = logging.getLogger('intruder.py')
+
+result = []
+
+class Intruder():
+    def __init__(self, url, rule, method, timeout, concurrency):
+        self.url = url
+        self.rule = rule
+        self.method = method
+        self.concurrency = concurrency
+        self.q = Queue()
+        self.start_time = time.time()
+        self.end_time = None
+        self.headers = {}
+        self.timeout = timeout
+        
+    async def fetch(self, url):
+        async with aiohttp.ClientSession() as session:
+            timeout = aiohttp.ClientTimeout(total=self.timeout)
+            try:
+                response = await session.get(url, allow_redirects=False, 
+                    timeout=timeout)
+                logger.info("{} -> {}".format(url, response.status))
+                result.append(response)
+            except asyncio.exceptions.TimeoutError:
+                logger.debug('{} -> Timeout({}s)'.format(url, self.timeout))
+            except aiohttp.client_exceptions.ClientConnectorError:
+                logger.debug("{} -> ConnectorError".format(url))
+            except Exception as ee:
+                logger.error(url, str(ee))
+
+    async def worker(self):
+        while 1:
+            url = await self.q.get()
+            await self.fetch(url)
+            self.q.task_done()
+            await asyncio.sleep(1)
+
+    def gen_url(self):
+        dicts = self.parse_rule_of_dict()
+        for d in dicts:
+            u = self.url.format(payload=d)
+            self.q.put_nowait(u)
+
+    def parse_rule_of_dict(self):
+        if Counter(self.rule)['-'] != 1:
+            log('bad rule, exit')
+            sys.exit()
+        ss = self.rule.strip().split('-')
+        start = ss[0]
+        end = ss[-1]
+
+        if len(start)+len(end) != 2 or (ord(start) in range(48, 58) and ord(end) in range(48, 58)):
+            try:
+                start = int(start)
+                end = int(end)
+                return [ i for i in range(start, end+1) ]
+            except:
+                logger.critical('rule parse error')
+                sys.exit()
+        else:
+            pass
+
+    async def start(self):
+        self.__workers = [ asyncio.Task(self.worker())
+                            for _ in range(self.concurrency) ]
+        self.gen_url()
+        await self.q.join()
+        self.end_time = time.time()
+        for w in self.__workers:
+            w.cancel()
+
+def process_aio_response():
+    logger.info('RESULT: \n'+'*'*88)
+    for r in result:
+        headers = b''
+        for h in r.raw_headers:
+            headers += h[0]
+            headers += b": "
+            headers += h[1]
+            headers += b'\n'
+        headers = headers.decode('utf8')
+        logger.info(color_yellow+str(r.url)+color_reset+'\n'+'>'*28+'\n'+headers+'<'*28)
+
+def main(url, rule, method, timeout, concurrency):
+    loop = asyncio.get_event_loop()
+    intruder = Intruder(url, rule, method, timeout, concurrency=concurrency)
+    loop.run_until_complete(intruder.start())
+    logger.info('Finished in {:.3f} secs'.format(intruder.end_time - intruder.start_time))
+    loop.close()
+    process_aio_response()
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='')
+    parser.add_argument('-d', '--dict', dest='brute_dict', help='/path/to/dict.txt')
+    parser.add_argument('-r', '--rule', dest='dict_rule', help='e.g. 1-256, a-z')
+    parser.add_argument('-m', '--mode', dest='intruder_mode', default='sniper',
+        choices=['sniper', 'pitchfork', 'cluster_bomb', 'battering_ram'], help='intruder mode, default: sniper')
+    parser.add_argument('-u', '--url', dest='url', help='url')
+    parser.add_argument('-H', '--header', '--headers', dest='headers', help='header')
+    parser.add_argument('-k', dest='ignore_ssl', action='store_true', default=True, help='ignore ssl')
+    parser.add_argument('-X', '-x', '--method', dest='method', help='method', default='get')
+    parser.add_argument('-t', '--time-out', '--timeout',  dest='timeout', help='timeout', default=3, type=int)
+    parser.add_argument('-c', '--concurrency', dest='concurrency', help='concurrency', default=20, type=int)
+    parser.add_argument('--debug', dest='debug', action='store_true', default=False)
+    args = parser.parse_args()
+    if not args.url:
+        parser.print_help()
+        sys.exit()
+
+    if not args.brute_dict and not args.dict_rule:
+        parser.print_help()
+        print('Error: need --rule or --dict')
+        sys.exit()
+
+    return args
+
+if __name__ == '__main__':
+    args = parse_args()
+    if args.debug:
+        logger.setLevel('DEBUG')
+    main(url=args.url, rule=args.dict_rule, method=args.method,
+            timeout=args.timeout, concurrency=args.concurrency)
+    
