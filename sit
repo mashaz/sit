@@ -23,17 +23,24 @@ if sys.version_info[0] < 3 or \
     (sys.version_info[0] >= 3 and sys.version_info[1] < 7):
     raise Exception("Need python version >= 3.7")
 
-color_grey = "\x1b[38;21m"
-color_yellow = "\x1b[33;21m"
-color_red = "\x1b[31;21m"
-color_bold_red = "\x1b[31;1m"
-color_reset = "\x1b[0m"
+COLORS = {
+    'grey': '\x1b[38;21m',
+    'yellow': '\x1b[33;21m',
+    'red': '\x1b[31;21m',
+    'bold_red': '\x1b[31;1m',
+    'reset': '\x1b[0m'
+}
 
 FORMAT = '%(asctime)s [%(levelname)s] %(message)s'
 logging.basicConfig(format=FORMAT, level='INFO')
 logger = logging.getLogger('intruder.py')
 
 result = []
+
+def color(msg, c='yellow'):
+    if not isinstance(msg, str):
+        return
+    return '{}{}{}'.format(COLORS[c], msg, COLORS['reset'])
 
 class Intruder():
     def __init__(self, url, rule, method, timeout, concurrency):
@@ -44,21 +51,29 @@ class Intruder():
         self.q = Queue()
         self.start_time = time.time()
         self.end_time = None
-        self.headers = {}
+        self.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.141 Safari/537.36'}
         self.timeout = timeout
         
     async def fetch(self, url):
         async with aiohttp.ClientSession() as session:
             timeout = aiohttp.ClientTimeout(total=self.timeout)
             try:
-                response = await session.get(url, allow_redirects=False, 
-                    timeout=timeout)
+                if self.method.lower() == 'get':
+                    response = await session.get(url, allow_redirects=False, 
+                        timeout=timeout, headers=self.headers)
+                elif self.method.lower() == 'post':
+                    response = await session.post(url, allow_redirects=False, 
+                        timeout=timeout, headers=self.headers)
+                else:
+                    raise Exception('{} not support'.format(self.method))
                 logger.info("{} -> {}".format(url, response.status))
                 result.append(response)
             except asyncio.exceptions.TimeoutError:
                 logger.debug('{} -> Timeout({}s)'.format(url, self.timeout))
             except aiohttp.client_exceptions.ClientConnectorError:
                 logger.debug("{} -> ConnectorError".format(url))
+            except aiohttp.client_exceptions.ServerDisconnectedError:
+                logger.debug("{} -> ServerDisconnectedElllrror".format(url))
             except Exception as ee:
                 logger.error(url, str(ee))
 
@@ -113,7 +128,7 @@ def process_aio_response():
             headers += h[1]
             headers += b'\n'
         headers = headers.decode('utf8')
-        logger.info(color_yellow+str(r.url)+color_reset+'\n'+'>'*28+'\n'+headers+'<'*28)
+        logger.info(color(str(r.url)+' '+str(r.status))+'\n'+headers)
 
 def main(url, rule, method, timeout, concurrency):
     loop = asyncio.get_event_loop()
@@ -136,6 +151,8 @@ def parse_args():
     parser.add_argument('-t', '--time-out', '--timeout',  dest='timeout', help='timeout', default=3, type=int)
     parser.add_argument('-c', '--concurrency', dest='concurrency', help='concurrency', default=20, type=int)
     parser.add_argument('--debug', dest='debug', action='store_true', default=False)
+    parser.add_argument('--status-code', dest='status_code', type=int, default=0, 
+        help='0 for never check status code')
     args = parser.parse_args()
     if not args.url:
         parser.print_help()
